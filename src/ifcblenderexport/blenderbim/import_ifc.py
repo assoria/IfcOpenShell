@@ -21,12 +21,25 @@ class MaterialCreator():
         self.mesh = None
         self.materials = {}
 
-    def set_mesh(self, mesh):
+    def create(self, element, object, mesh):
+        self.object = object
         self.mesh = mesh
-
-    def create(self, material_select):
-        if material_select.is_a('IfcMaterialDefinition'):
-            return self.create_definition(material_select)
+        if not element.Representation:
+            return
+        for item in element.Representation.Representations[0].Items:
+            if item.StyledByItem:
+                styled_item = item.StyledByItem[0]
+                material_name = str(styled_item.Name if styled_item.Name else styled_item.id())
+                if material_name not in self.materials:
+                    self.materials[material_name] = bpy.data.materials.new(material_name)
+                self.parse_styled_item(item.StyledByItem[0], self.materials[material_name])
+                self.assign_material_to_mesh(self.materials[material_name], is_styled_item=True)
+                return # styled items override material styles
+        for association in element.HasAssociations:
+            if association.is_a('IfcRelAssociatesMaterial'):
+                material_select = association.RelatingMaterial
+                if material_select.is_a('IfcMaterialDefinition'):
+                    self.create_definition(material_select)
 
     def create_definition(self, material):
         if material.is_a('IfcMaterial'):
@@ -48,22 +61,40 @@ class MaterialCreator():
             for item in representation.Items:
                 if not item.is_a('IfcStyledItem'):
                     continue
-                for style in item.Styles:
-                    if not style.is_a('IfcSurfaceStyle'):
-                        continue
-                    for surface_style in style.Styles:
-                        if surface_style.is_a('IfcSurfaceStyleShading'):
-                            alpha = 1.
-                            if surface_style.Transparency:
-                                alpha = 1 - surface_style.Transparency
-                            self.materials[material.Name].diffuse_color = (
-                                surface_style.SurfaceColour.Red,
-                                surface_style.SurfaceColour.Green,
-                                surface_style.SurfaceColour.Blue,
-                                alpha)
+                self.parse_styled_item(item, self.materials[material.Name])
 
-    def assign_material_to_mesh(self, material):
+    def parse_styled_item(self, styled_item, material):
+        for style in styled_item.Styles:
+            # Note IfcPresentationStyleAssignment is deprecated as of IFC4,
+            # but we still support it as it is widely used
+            if style.is_a('IfcPresentationStyleAssignment'):
+                style = style.Styles[0]
+            if not style.is_a('IfcSurfaceStyle'):
+                continue
+            external_style = None
+            for surface_style in style.Styles:
+                if surface_style.is_a('IfcSurfaceStyleShading'):
+                    alpha = 1.
+                    if surface_style.Transparency:
+                        alpha = 1 - surface_style.Transparency
+                    material.diffuse_color = (
+                        surface_style.SurfaceColour.Red,
+                        surface_style.SurfaceColour.Green,
+                        surface_style.SurfaceColour.Blue,
+                        alpha)
+                elif surface_style.is_a('IfcExternallyDefinedSurfaceStyle'):
+                    external_style = surface_style
+            if external_style:
+                material.BIMMaterialProperties.is_external = True
+                material.BIMMaterialProperties.location = external_style.Location
+                material.BIMMaterialProperties.identification = external_style.Identification
+                material.BIMMaterialProperties.name = external_style.Name
+
+    def assign_material_to_mesh(self, material, is_styled_item=False):
         self.mesh.materials.append(material)
+        if is_styled_item:
+            self.object.material_slots[0].link = 'OBJECT'
+            self.object.material_slots[0].material = material
 
 class IfcImporter():
     def __init__(self, ifc_import_settings):
@@ -191,13 +222,45 @@ class IfcImporter():
             print('Failed to generate shape for {}'.format(element))
             return
 
+        obj = bpy.data.objects.new(self.get_name(element), mesh)
+        self.material_creator.create(element, obj, mesh)
+        obj.matrix_world = self.get_element_matrix(element, mesh_name)
+        self.add_element_attributes(element, obj)
+        self.add_element_document_relations(element, obj)
+        self.place_object_in_spatial_tree(element, obj)
+
+    def add_element_document_relations(self, element, obj):
         for association in element.HasAssociations:
-            if association.is_a('IfcRelAssociatesMaterial'):
-                self.material_creator.set_mesh(mesh)
-                self.material_creator.create(association.RelatingMaterial)
+            if association.is_a('IfcRelAssociatesDocument'):
+                document_reference = association.RelatingDocument
+                document = obj.BIMObjectProperties.documents.add()
+                document.file = document_reference.Location
 
-        object = bpy.data.objects.new(self.get_name(element), mesh)
+    def place_object_in_spatial_tree(self, element, obj):
+        if hasattr(element, 'ContainedInStructure') \
+            and element.ContainedInStructure \
+            and element.ContainedInStructure[0].RelatingStructure:
+            structure_name = self.get_name(element.ContainedInStructure[0].RelatingStructure)
+            if structure_name in self.spatial_structure_elements:
+                self.spatial_structure_elements[structure_name]['blender'].objects.link(obj)
+        else:
+            print('Warning: this object is outside the spatial hierarchy')
+            bpy.context.scene.collection.objects.link(obj)
 
+    def add_element_attributes(self, element, obj):
+        attributes = element.get_info()
+        if element.is_a() in ifc_schema.elements:
+            applicable_attributes = [a['name'] for a in ifc_schema.elements[element.is_a()]['attributes']]
+            for key, value in attributes.items():
+                if key not in applicable_attributes \
+                        or value is None:
+                    continue
+                attribute = obj.BIMObjectProperties.attributes.add()
+                attribute.name = key
+                attribute.data_type = 'string'
+                attribute.string_value = str(value)
+
+    def get_element_matrix(self, element, mesh_name):
         element_matrix = self.get_local_placement(element.ObjectPlacement)
 
         # Blender supports reusing a mesh with a different transformation
@@ -227,29 +290,7 @@ class IfcImporter():
         element_matrix[1][3] *= self.unit_scale
         element_matrix[2][3] *= self.unit_scale
 
-        object.matrix_world = element_matrix # element_matrix gives wrong results
-
-        attributes = element.get_info()
-        if element.is_a() in ifc_schema.elements:
-            applicable_attributes = [a['name'] for a in ifc_schema.elements[element.is_a()]['attributes']]
-            for key, value in attributes.items():
-                if key not in applicable_attributes \
-                    or value is None:
-                    continue
-                attribute = object.BIMObjectProperties.attributes.add()
-                attribute.name = key
-                attribute.data_type = 'string'
-                attribute.string_value = str(value)
-
-        if hasattr(element, 'ContainedInStructure') \
-            and element.ContainedInStructure \
-            and element.ContainedInStructure[0].RelatingStructure:
-            structure_name = self.get_name(element.ContainedInStructure[0].RelatingStructure)
-            if structure_name in self.spatial_structure_elements:
-                self.spatial_structure_elements[structure_name]['blender'].objects.link(object)
-        else:
-            print('Warning: this object is outside the spatial hierarchy')
-            bpy.context.scene.collection.objects.link(object)
+        return element_matrix
 
     def get_representation_id(self, element):
         if not element.Representation:
@@ -300,22 +341,21 @@ class IfcImporter():
         r.resize_4x4()
         r.transpose()
         return r
-        
-    def get_axis2placement(self, plc): 
-        z = mathutils.Vector(plc.Axis.DirectionRatios if plc.Axis else (0,0,1)) 
-        x = mathutils.Vector(plc.RefDirection.DirectionRatios if plc.RefDirection else (1,0,0)) 
-        o = plc.Location.Coordinates 
-        return self.a2p(o,z,x) 
 
-    def get_cartesiantransformationoperator(self, plc): 
-        #z = mathutils.Vector(plc.Axis3.DirectionRatios if plc.Axis3 else (0,0,1)) 
-        x = mathutils.Vector(plc.Axis1.DirectionRatios if plc.Axis1 else (1,0,0)) 
+    def get_axis2placement(self, plc):
+        z = mathutils.Vector(plc.Axis.DirectionRatios if plc.Axis else (0,0,1))
+        x = mathutils.Vector(plc.RefDirection.DirectionRatios if plc.RefDirection else (1,0,0))
+        o = plc.Location.Coordinates
+        return self.a2p(o,z,x)
+
+    def get_cartesiantransformationoperator(self, plc):
+        x = mathutils.Vector(plc.Axis1.DirectionRatios if plc.Axis1 else (1,0,0))
         z = x.cross(mathutils.Vector(plc.Axis2.DirectionRatios if plc.Axis2 else (0,1,0)))
-        o = plc.LocalOrigin.Coordinates 
-        return self.a2p(o,z,x) 
-        
+        o = plc.LocalOrigin.Coordinates
+        return self.a2p(o,z,x)
+
     def get_local_placement(self, plc):
-        if plc.PlacementRelTo is None: 
+        if plc.PlacementRelTo is None:
             parent = mathutils.Matrix()
         else:
             parent = self.get_local_placement(plc.PlacementRelTo)

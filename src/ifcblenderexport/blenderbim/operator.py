@@ -1,3 +1,4 @@
+import os
 import bpy
 import time
 import json
@@ -35,6 +36,19 @@ class ExportIFC(bpy.types.Operator):
         ifc_export_settings.has_representations = bpy.context.scene.BIMProperties.export_has_representations
         ifc_export_settings.should_export_all_materials_as_styled_items = bpy.context.scene.BIMProperties.export_should_export_all_materials_as_styled_items
         ifc_export_settings.should_use_presentation_style_assignment = bpy.context.scene.BIMProperties.export_should_use_presentation_style_assignment
+        ifc_export_settings.context_tree = []
+        for context in ['model', 'plan']:
+            if getattr(bpy.context.scene.BIMProperties, 'has_{}_context'.format(context)):
+                subcontexts = {}
+                for subcontext in getattr(bpy.context.scene.BIMProperties, '{}_subcontexts'.format(context)):
+                    subcontexts.setdefault(subcontext.name, []).append(subcontext.target_view)
+                ifc_export_settings.context_tree.append({
+                    'name': context.title(),
+                    'subcontexts': [
+                        { 'name': key, 'target_views': value }
+                        for key, value in subcontexts.items()
+                    ]
+                })
         ifc_parser = export_ifc.IfcParser(ifc_export_settings)
         ifc_schema = export_ifc.IfcSchema(ifc_export_settings)
         qto_calculator = export_ifc.QtoCalculator()
@@ -189,9 +203,11 @@ class ApproveClass(bpy.types.Operator):
     def execute(self, context):
         with open(bpy.context.scene.BIMProperties.data_dir + 'audit.txt', 'a') as file:
             for object in bpy.context.selected_objects:
+                index = object.BIMObjectProperties.attributes.find('GlobalId')
+                if index == -1:
+                    continue
                 file.write('Then the element {} is an {}\n'.format(
-                    object.BIMObjectProperties.attributes[
-                        object.BIMObjectProperties.attributes.find('GlobalId')].string_value,
+                    object.BIMObjectProperties.attributes[index].string_value,
                     object.name.split('/')[0]))
         return {'FINISHED'}
 
@@ -205,7 +221,7 @@ class RejectClass(bpy.types.Operator):
                 file.write('Then the element {} is an {}\n'.format(
                     object.BIMObjectProperties.attributes[
                         object.BIMObjectProperties.attributes.find('GlobalId')].string_value,
-                    bpy.context.scene.BIMProperties.ifc_class))
+                    bpy.context.scene.BIMProperties.audit_ifc_class))
         return {'FINISHED'}
 
 class RejectElement(bpy.types.Operator):
@@ -639,10 +655,99 @@ class RemoveClassification(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class FetchExternalMaterial(bpy.types.Operator):
+    bl_idname = 'bim.fetch_external_material'
+    bl_label = 'Fetch External Material'
+
+    def execute(self, context):
+        location = bpy.context.active_object.active_material.BIMMaterialProperties.location
+        if location[-6:] != '.mpass':
+            return {'FINISHED'}
+        if not os.path.isabs(location):
+            location = os.path.join(os.path.join(
+                bpy.context.scene.BIMProperties.data_dir, location))
+        with open(location) as f:
+            self.material_pass = json.load(f)
+        if bpy.context.scene.render.engine == 'BLENDER_EEVEE' \
+                and 'eevee' in self.material_pass:
+            self.fetch_eevee_or_cycles('eevee')
+        elif bpy.context.scene.render.engine == 'CYCLES' \
+                and 'cycles' in self.material_pass:
+            self.fetch_eevee_or_cycles('cycles')
+        return {'FINISHED'}
+
+    def fetch_eevee_or_cycles(self, name):
+        identification = bpy.context.active_object.active_material.BIMMaterialProperties.identification
+        uri = self.material_pass[name]['uri']
+        if not os.path.isabs(uri):
+            uri = os.path.join(os.path.join(
+                bpy.context.scene.BIMProperties.data_dir, uri))
+        bpy.ops.wm.link(
+            filename=identification,
+            directory=os.path.join(uri, 'Material')
+        )
+        for material in bpy.data.materials:
+            if material.name == identification \
+                    and material.library:
+                bpy.context.active_object.material_slots[0].material = material
+                return
+
+
 class FetchLibraryInformation(bpy.types.Operator):
     bl_idname = 'bim.fetch_library_information'
     bl_label = 'Fetch Library Information'
 
     def execute(self, context):
         # TODO
+        return {'FINISHED'}
+
+
+class FetchObjectPassport(bpy.types.Operator):
+    bl_idname = 'bim.fetch_object_passport'
+    bl_label = 'Fetch Object Passport'
+
+    def execute(self, context):
+        for document in bpy.context.active_object.BIMObjectProperties.documents:
+            if not document.file[-6:] == '.opass':
+                continue
+            with open(os.path.join(bpy.context.scene.BIMProperties.data_dir, 'doc', document.file)) as f:
+                self.object_pass = json.load(f)
+            if 'blender' in self.object_pass:
+                self.fetch_blender()
+        return {'FINISHED'}
+
+    def fetch_blender(self):
+        identification = self.object_pass['blender']['identification']
+        uri = os.path.join(bpy.context.scene.BIMProperties.data_dir,
+                           'doc',
+                           self.object_pass['blender']['uri'])
+        bpy.ops.wm.link(
+            filename=identification,
+            directory=os.path.join(uri, 'Mesh')
+        )
+        bpy.context.active_object.data = bpy.data.meshes[identification]
+
+
+class AddSubcontext(bpy.types.Operator):
+    bl_idname = 'bim.add_subcontext'
+    bl_label = 'Add Subcontext'
+    context: bpy.props.StringProperty()
+
+    def execute(self, context):
+        props = bpy.context.scene.BIMProperties
+        subcontext = getattr(bpy.context.scene.BIMProperties, '{}_subcontexts'.format(self.context)).add()
+        subcontext.name = bpy.context.scene.BIMProperties.available_subcontexts
+        subcontext.target_view = bpy.context.scene.BIMProperties.available_target_views
+        return {'FINISHED'}
+
+
+class RemoveSubcontext(bpy.types.Operator):
+    bl_idname = 'bim.remove_subcontext'
+    bl_label = 'Remove Context'
+    indexes: bpy.props.StringProperty()
+
+    def execute(self, context):
+        context, subcontext_index = self.indexes.split('-')
+        subcontext_index = int(subcontext_index)
+        getattr(bpy.context.scene.BIMProperties, '{}_subcontexts'.format(context)).remove(subcontext_index)
         return {'FINISHED'}

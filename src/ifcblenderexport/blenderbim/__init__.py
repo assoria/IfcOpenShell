@@ -57,6 +57,11 @@ classes = (
     operator.UnassignClassification,
     operator.RemoveClassification,
     operator.FetchLibraryInformation,
+    operator.FetchExternalMaterial,
+    operator.FetchObjectPassport,
+    operator.AddSubcontext,
+    operator.RemoveSubcontext,
+    prop.Subcontext,
     prop.BIMProperties,
     prop.BIMLibrary,
     prop.MapConversion,
@@ -71,6 +76,7 @@ classes = (
     prop.SweptSolid,
     prop.BIMMeshProperties,
     ui.BIM_PT_bim,
+    ui.BIM_PT_context,
     ui.BIM_PT_qa,
     ui.BIM_PT_library,
     ui.BIM_PT_gis,
@@ -92,6 +98,7 @@ def menu_func_import(self, context):
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
+    bpy.app.handlers.load_post.append(prop.setDefaultProperties)
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
     bpy.types.Scene.BIMProperties = bpy.props.PointerProperty(type=prop.BIMProperties)
@@ -106,6 +113,7 @@ def register():
 def unregister():
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
+    bpy.app.handlers.load_post.remove(prop.setDefaultProperties)
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
     del(bpy.types.Scene.BIMProperties)

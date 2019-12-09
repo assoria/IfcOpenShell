@@ -7,13 +7,13 @@ class BIM_PT_object(Panel):
     bl_space_type = 'PROPERTIES'
     bl_region_type = 'WINDOW'
     bl_context = 'object'
-    
+
     @classmethod
     def poll(cls, context):
         return context.active_object is not None and hasattr(context.active_object, "BIMObjectProperties")
-    
+
     def draw(self, context):
-        
+
         if context.active_object is None:
             return
         layout = self.layout
@@ -55,6 +55,9 @@ class BIM_PT_object(Panel):
         row.prop(props, 'applicable_documents', text='')
         row.operator('bim.add_document')
 
+        row = layout.row()
+        row.operator('bim.fetch_object_passport')
+
         for index, document in enumerate(props.documents):
             row = layout.row(align=True)
             row.prop(document, 'file', text='')
@@ -86,7 +89,7 @@ class BIM_PT_mesh(Panel):
     def poll(cls, context):
         return context.active_object is not None and context.active_object.type == "MESH" and \
                hasattr(context.active_object.data, "BIMMeshProperties")
-    
+
     def draw(self, context):
         if not context.active_object.data:
             return
@@ -123,11 +126,11 @@ class BIM_PT_material(Panel):
     bl_space_type = 'PROPERTIES'
     bl_region_type = 'WINDOW'
     bl_context = 'material'
-    
+
     @classmethod
     def poll(cls, context):
         return context.active_object is not None and context.active_object.active_material is not None
-    
+
     def draw(self, context):
         if not bpy.context.active_object.active_material:
             return
@@ -142,6 +145,9 @@ class BIM_PT_material(Panel):
         row.prop(props, 'identification')
         row = layout.row()
         row.prop(props, 'name')
+
+        row = layout.row()
+        row.operator('bim.fetch_external_material')
 
 
 class BIM_PT_gis(Panel):
@@ -174,6 +180,36 @@ class BIM_PT_gis(Panel):
         layout.row().prop(scene.TargetCRS, 'map_projection')
         layout.row().prop(scene.TargetCRS, 'map_zone')
         layout.row().prop(scene.TargetCRS, 'map_unit')
+
+
+class BIM_PT_context(Panel):
+    bl_label = "Geometric Representation Contexts"
+    bl_idname = "BIM_PT_context"
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = "scene"
+
+    def draw(self, context):
+        layout = self.layout
+
+        scene = context.scene
+        props = scene.BIMProperties
+
+        for context in ['model', 'plan']:
+            row = layout.row(align=True)
+            row.prop(props, 'has_{}_context'.format(context))
+            layout.label(text="Geometric Representation Subcontexts:")
+
+            row = layout.row(align=True)
+            row.prop(props, 'available_subcontexts', text='')
+            row.prop(props, 'available_target_views', text='')
+            row.operator('bim.add_subcontext', icon='ADD', text='').context = context
+
+            for subcontext_index, subcontext in enumerate(getattr(props, '{}_subcontexts'.format(context))):
+                row = layout.row(align=True)
+                row.prop(subcontext, 'name', text='')
+                row.prop(subcontext, 'target_view', text='')
+                row.operator('bim.remove_subcontext', icon='X', text='').indexes = '{}-{}'.format(context, subcontext_index)
 
 
 class BIM_PT_bim(Panel):
@@ -291,6 +327,9 @@ class BIM_PT_qa(Panel):
         row = layout.row(align=True)
         row.operator("bim.colour_by_class")
         row.operator("bim.reset_object_colours")
+
+        row = layout.row()
+        row.prop(bim_properties, "audit_ifc_class")
 
         row = layout.row(align=True)
         row.operator("bim.approve_class")
